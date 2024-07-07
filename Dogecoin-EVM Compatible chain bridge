@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+contract DogeERC20 is ERC20 {
+    constructor(uint256 initialSupply) ERC20("Doge Token", "DOGE") {
+        _mint(msg.sender, initialSupply);
+    }
+}
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+contract EVMDogeBridge {
+    IERC20 public token;
+    address public admin;
+
+    event TokensLocked(address indexed user, uint256 amount);
+    event TokensUnlocked(address indexed user, uint256 amount);
+
+    constructor(address tokenAddress) {
+        token = IERC20(tokenAddress);
+        admin = msg.sender;
+    }
+
+    function lockTokens(uint256 amount) external {
+        require(token.transferFrom(msg.sender, address(this), amount), "Transfer failed");
+        emit TokensLocked(msg.sender, amount);
+    }
+
+    function unlockTokens(address user, uint256 amount) external {
+        require(msg.sender == admin, "Only admin can unlock tokens");
+        require(token.transfer(user, amount), "Transfer failed");
+        emit TokensUnlocked(user, amount);
+    }
+}
+import json
+import requests
+from web3 import Web3
+
+# Configuration
+dogecoin_rpc_url = "DOGECOIN_RPC_URL"
+ethereum_rpc_url = "ETHEREUM_RPC_URL"
+bridge_contract_address = "BRIDGE_CONTRACT_ADDRESS"
+bridge_abi = json.load(open('BridgeABI.json'))
+private_key = "YOUR_PRIVATE_KEY"
+
+# Initialize Web3
+w3 = Web3(Web3.HTTPProvider(ethereum_rpc_url))
+
+# Dogecoin RPC client
+def call_dogecoin_rpc(method, params):
+    headers = {'content-type': 'application/json'}
+    payload = {
+        "method": method,
+        "params": params,
+        "jsonrpc": "2.0",
+        "id": 0,
+    }
+    response = requests.post(dogecoin_rpc_url, data=json.dumps(payload), headers=headers).json()
+    return response['result']
+
+# Monitor Dogecoin transactions
+def monitor_dogecoin():
+    while True:
+        transactions = call_dogecoin_rpc("listtransactions", ["*", 100])
+        for tx in transactions:
+            if tx["category"] == "receive" and tx["confirmations"] > 0:
+                process_dogecoin_deposit(tx)
+        time.sleep(10)
+
+# Process Dogecoin deposit
+def process_dogecoin_deposit(tx):
+    user_address = tx["address"]
+    amount = tx["amount"]
+    nonce = w3.eth.getTransactionCount(user_address)
+    bridge_contract = w3.eth.contract(address=bridge_contract_address, abi=bridge_abi)
+    tx = bridge_contract.functions.unlockTokens(user_address, int(amount * 10**18)).buildTransaction({
+        'chainId': 1,
+        'gas': 2000000,
+        'gasPrice': w3.toWei('50', 'gwei'),
+        'nonce': nonce,
+    })
+    signed_tx = w3.eth.account.signTransaction(tx, private_key)
+    tx_hash = w3.eth.sendRawTransaction(signed_tx.rawTransaction)
+    print(f"Processed Dogecoin deposit: {tx_hash.hex()}")
+
+# Monitor Ethereum events
+def monitor_ethereum():
+    bridge_contract = w3.eth.contract(address=bridge_contract_address, abi=bridge_abi)
+    event_filter = bridge_contract.events.TokensLocked.createFilter(fromBlock='latest')
+    while True:
+        for event in event_filter.get_new_entries():
+            process_ethereum_lock(event)
+        time.sleep(10)
+
+# Process Ethereum lock event
+def process_ethereum_lock(event):
+    user_address = event['args']['user']
+    amount = event['args']['amount']
+    txid = call_dogecoin_rpc("sendtoaddress", [user_address, amount / 10**18])
+    print(f"Processed Ethereum lock event: {txid}")
+
+# Run monitors
+if __name__ == "__main__":
+    from threading import Thread
+    Thread(target=monitor_dogecoin).start()
+    Thread(target=monitor_ethereum).start()
